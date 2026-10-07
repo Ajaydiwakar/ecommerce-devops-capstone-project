@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Product.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">ecommerce</a> &gt; <a href="index.source.html" class="el_package">com.ecommerce.model</a> &gt; <span class="el_source">Product.java</span></div><h1>Product.java</h1><pre class="source lang-java linenums">package com.ecommerce.model;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import java.io.Serializable;
+
+@Entity
+<span class="fc" id="L9">public class Product implements Serializable {</span>
+    private static final long serialVersionUID = 1L;
+
+    @Id
+    private Long id;
+    private String name;
+
+    @Column(length = 1000)
+    private String description;
+
+    private String category;
+    private String sizes;
+    private Double price;
+
+    // Example: &quot;products/iphone15.jpg&quot; - the S3 object key.
+    // This string is stored next to product data in the database.
+    private String imageKey;
+
+    // Getters and Setters
+<span class="fc" id="L28">    public Long getId() { return id; }</span>
+<span class="fc" id="L29">    public void setId(Long id) { this.id = id; }</span>
+<span class="fc" id="L30">    public String getName() { return name; }</span>
+<span class="fc" id="L31">    public void setName(String name) { this.name = name; }</span>
+<span class="nc" id="L32">    public String getDescription() { return description; }</span>
+<span class="fc" id="L33">    public void setDescription(String description) { this.description = description; }</span>
+<span class="fc" id="L34">    public String getCategory() { return category; }</span>
+<span class="fc" id="L35">    public void setCategory(String category) { this.category = category; }</span>
+<span class="fc" id="L36">    public String getSizes() { return sizes; }</span>
+<span class="fc" id="L37">    public void setSizes(String sizes) { this.sizes = sizes; }</span>
+<span class="nc" id="L38">    public Double getPrice() { return price; }</span>
+<span class="fc" id="L39">    public void setPrice(Double price) { this.price = price; }</span>
+<span class="fc" id="L40">    public String getImageKey() { return imageKey; }</span>
+<span class="fc" id="L41">    public void setImageKey(String imageKey) { this.imageKey = imageKey; }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

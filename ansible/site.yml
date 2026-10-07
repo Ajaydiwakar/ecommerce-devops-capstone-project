@@ -1,0 +1,31 @@
+---
+- name: Prepare common EC2 baselines
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - common
+
+- name: Configure Jenkins master
+  hosts: jenkins_master
+  become: true
+  roles:
+    - jenkins_master
+
+- name: Configure Jenkins agents
+  hosts: jenkins_agents
+  become: true
+  roles:
+    - jenkins_agent
+
+- name: Configure SonarQube server
+  hosts: sonarqube
+  become: true
+  roles:
+    - sonarqube
+
+- name: Configure Maven and Trivy build tools
+  hosts: build_tools
+  become: true
+  roles:
+    - build_tools

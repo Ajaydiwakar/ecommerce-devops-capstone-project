@@ -1,0 +1,34 @@
+---
+- name: Add Jenkins repository
+  yum_repository:
+    name: jenkins
+    description: Jenkins stable repo
+    baseurl: https://pkg.jenkins.io/redhat-stable
+    gpgcheck: true
+    gpgkey: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+    enabled: true
+
+- name: Install Jenkins
+  yum:
+    name: jenkins
+    state: present
+
+- name: Ensure Jenkins service is enabled and started
+  systemd:
+    name: jenkins
+    enabled: true
+    state: started
+
+- name: Open Jenkins UI port 8080 when firewalld is present
+  shell: |
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      firewall-cmd --permanent --add-port=8080/tcp >/dev/null 2>&1 || true
+      firewall-cmd --permanent --add-port=50000/tcp >/dev/null 2>&1 || true
+      firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+  changed_when: false
+
+- name: Wait for Jenkins to come up
+  wait_for:
+    port: 8080
+    timeout: 180

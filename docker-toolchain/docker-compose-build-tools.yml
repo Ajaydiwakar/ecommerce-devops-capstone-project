@@ -1,0 +1,40 @@
+version: "3.9"
+
+# Single EC2 build host that runs both Maven and Trivy as separate containers.
+# Jenkins master / agents and SonarQube can reach these services over the host IP
+# using the published ports below, instead of creating two separate EC2 instances.
+services:
+  maven:
+    image: maven:3.9.9-eclipse-temurin-17
+    container_name: maven-builder
+    working_dir: /workspace
+    volumes:
+      - ../:/workspace
+    stdin_open: true
+    tty: true
+    ports:
+      # Exposed on the EC2 host for Jenkins or Sonar to reach the container.
+      # Example: http://<ec2-public-ip>:18080
+      - "18080:8080"
+    command: ["bash", "-lc", "while true; do sleep 3600; done"]
+    restart: unless-stopped
+
+  trivy:
+    image: aquasec/trivy:0.54.1
+    container_name: trivy-scanner
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../:/workspace
+    stdin_open: true
+    tty: true
+    ports:
+      # Exposed on the EC2 host for Jenkins or Sonar to trigger scans remotely.
+      # Example: http://<ec2-public-ip>:18081
+      - "18081:8080"
+    command: ["sh", "-lc", "while true; do sleep 3600; done"]
+    restart: unless-stopped
+
+# Notes:
+# - Maven is a CLI tool; it is kept alive in a Docker container so Jenkins can exec into it.
+# - Trivy is also kept alive as a container so scan jobs can be invoked from Jenkins or Sonar.
+# - The host machine should allow inbound access to 18080 and 18081 from the Jenkins and Sonar security groups.

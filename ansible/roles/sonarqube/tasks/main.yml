@@ -1,0 +1,37 @@
+---
+- name: Ensure Docker is available
+  systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Create SonarQube data directory
+  file:
+    path: /opt/sonarqube/data
+    state: directory
+    owner: 1000
+    group: 1000
+    mode: '0755'
+
+- name: Run SonarQube container
+  community.docker.docker_container:
+    name: sonarqube
+    image: sonarqube:community
+    state: started
+    restart_policy: unless-stopped
+    published_ports:
+      - "9000:9000"
+    env:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_extensions:/opt/sonarqube/extensions
+
+- name: Open SonarQube port 9000 when firewalld is present
+  shell: |
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      firewall-cmd --permanent --add-port=9000/tcp >/dev/null 2>&1 || true
+      firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+  changed_when: false

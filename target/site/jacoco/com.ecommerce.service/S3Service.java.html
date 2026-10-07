@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>S3Service.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">ecommerce</a> &gt; <a href="index.source.html" class="el_package">com.ecommerce.service</a> &gt; <span class="el_source">S3Service.java</span></div><h1>S3Service.java</h1><pre class="source lang-java linenums">package com.ecommerce.service;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.core.exception.SdkException;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
+import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+
+@Service
+<span class="fc" id="L17">public class S3Service {</span>
+
+    @Value(&quot;${aws.s3.bucket}&quot;)
+    private String bucketName;
+
+    // Uses the EC2 instance's IAM role - no hardcoded access keys
+<span class="fc" id="L23">    private final S3Presigner presigner = S3Presigner.builder()</span>
+<span class="fc" id="L24">            .region(Region.US_EAST_1)</span>
+<span class="fc" id="L25">            .credentialsProvider(DefaultCredentialsProvider.create())</span>
+<span class="fc" id="L26">            .build();</span>
+
+    public String getImageUrl(String imageKey) {
+<span class="nc bnc" id="L29" title="All 4 branches missed.">        if (imageKey == null || imageKey.isEmpty()) {</span>
+<span class="nc" id="L30">            return null;</span>
+        }
+
+        try {
+            // If AWS credentials are not configured, return a safe mock image URL instead of crashing
+<span class="nc bnc" id="L35" title="All 4 branches missed.">            if (System.getenv(&quot;AWS_ACCESS_KEY_ID&quot;) == null &amp;&amp; System.getProperty(&quot;aws.accessKeyId&quot;) == null) {</span>
+<span class="nc" id="L36">                return &quot;https://placehold.co/600x400/0d6efd/ffffff?text=&quot; +</span>
+<span class="nc" id="L37">                        URLEncoder.encode(imageKey, StandardCharsets.UTF_8);</span>
+            }
+
+<span class="nc" id="L40">            GetObjectRequest getObjectRequest = GetObjectRequest.builder()</span>
+<span class="nc" id="L41">                    .bucket(bucketName)</span>
+<span class="nc" id="L42">                    .key(imageKey)</span>
+<span class="nc" id="L43">                    .build();</span>
+
+            // Builds a pre-signed GET URL valid for 10 minutes
+<span class="nc" id="L46">            GetObjectPresignRequest presignRequest = GetObjectPresignRequest.builder()</span>
+<span class="nc" id="L47">                    .signatureDuration(Duration.ofMinutes(10))</span>
+<span class="nc" id="L48">                    .getObjectRequest(getObjectRequest)</span>
+<span class="nc" id="L49">                    .build();</span>
+
+<span class="nc" id="L51">            return presigner.presignGetObject(presignRequest).url().toString();</span>
+<span class="nc" id="L52">        } catch (SdkException e) {</span>
+<span class="nc" id="L53">            return &quot;https://placehold.co/600x400/0d6efd/ffffff?text=&quot; +</span>
+<span class="nc" id="L54">                    URLEncoder.encode(imageKey, StandardCharsets.UTF_8);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

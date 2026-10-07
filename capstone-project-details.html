@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AWS DevOps Architecture & Application Study Guide</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1200px; margin: 0 auto; padding: 20px; background-color: #f8f9fa; }
+        h1, h2, h3 { color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 10px; margin-top: 40px; }
+        h1 { font-size: 2.5em; text-align: center; border-bottom: 2px solid #3498db; }
+        .layer-box { background: #fff; padding: 20px 30px; margin-bottom: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        pre { background: #2d2d2d; color: #ccc; padding: 15px; border-radius: 5px; overflow-x: auto; font-family: 'Courier New', Courier, monospace; }
+        code { font-family: 'Courier New', Courier, monospace; background: #e8e8e8; padding: 2px 4px; border-radius: 3px; color: #d63384; }
+        pre code { background: transparent; padding: 0; color: inherit; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; margin-bottom: 15px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background-color: #f2f2f2; color: #333; }
+        .callout { background-color: #e8f4fd; border-left: 4px solid #3498db; padding: 15px; margin: 20px 0; }
+        .warning { background-color: #fef5e7; border-left: 4px solid #f39c12; padding: 15px; margin: 20px 0; }
+        .mermaid { margin: 30px 0; text-align: center; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    </style>
+    <!-- Load Mermaid.js for diagrams -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({startOnLoad:true});</script>
+</head>
+<body>
+
+    <h1>AWS DevOps Architecture & Application Study Guide</h1>
+    <div class="layer-box">
+        <h2>What the study guide contains (line by line, all topics)</h2>
+        <p><strong>Core Mental Model - "The Castle"</strong> - the nested-boundary analogy that makes every later decision derivable, plus the one question that unlocks all SG/subnet/ALB choices: <em>"Who initiates a connection to whom, on what port, in which direction?"</em></p>
+        <ul>
+            <li><strong>Layer 1 - Network topology:</strong> VPC, 2 public + 2 private subnets across 2 AZs, IGW vs NAT (opposite directions), route tables</li>
+            <li><strong>Layer 2 - Traffic flow:</strong> the ALB two-faced proxy and how it reaches a private server by private-IP routing inside the VPC (the exact mechanism that was your sticking point)</li>
+            <li><strong>Layer 3 - Security groups:</strong> the full SG table with the SG-references-SG pattern (self-healing, no IP maintenance)</li>
+            <li><strong>Layer 4 - Health checks:</strong> /actuator/health gating traffic, enabling zero-downtime rolling deploys</li>
+            <li><strong>Layer 5 - CI/CD:</strong> the Jenkins pipeline split - build+test+scan+push, then a separate pull-and-deploy stage; the immutable image as the handoff artifact</li>
+            <li><strong>Layer 6 - Ansible:</strong> agentless push over SSH, idempotent, on a dedicated server (deploy keys kept off the internet-facing bastion), serial: 1 rolling deploy</li>
+            <li><strong>Layer 7 - Data layer:</strong> RDS (source of truth) + Redis cache-aside + S3 via VPC Gateway Endpoint and IAM roles (no hardcoded keys)</li>
+            <li><strong>Breadth - Auto Scaling Group:</strong> launch template + user-data bootstrap + target-tracking policy, all as AWS CLI commands - no Terraform. Covers "pets vs cattle" and ELB-health self-healing.</li>
+            <li><strong>Application - Observability:</strong> the metrics/logs/traces triangle, the Four Golden Signals, and three concrete AWS CloudWatch put-metric-alarm examples wired to SNS.</li>
+        </ul>
+        <h3>Confidence recap</h3>
+        <p>Across the journey you self-rated 4-5 on every checkpoint and correctly articulated the three hardest ideas in your own words:</p>
+        <ol>
+            <li>ALB -> private via internal private-IP routing (not public IPs)</li>
+            <li>SG-references-SG gives IP-free, self-healing authorization</li>
+            <li>The immutable tested image is the deploy/rollback unit</li>
+        </ol>
+    </div>
+
+    <div class="layer-box">
+        <h2>The Core Mental Model: "The Castle"</h2>
+        <p>Before any security group or subnet, internalize one idea: AWS networking is a series of nested boundaries, and every connection must be explicitly allowed in the direction it flows.</p>
+        <p>Think of your VPC as a medieval castle:</p>
+        <table>
+            <tr><th>Castle Concept</th><th>AWS Concept</th><th>Role</th></tr>
+            <tr><td>The castle walls = land</td><td>VPC (10.0.0.0/16)</td><td>Your private, isolated chunk of the AWS network</td></tr>
+            <tr><td>Outer courtyard (visible from road)</td><td>Public subnet</td><td>Has a route to the internet gateway; things here can have public IPs</td></tr>
+            <tr><td>Inner keep (no road access)</td><td>Private subnet</td><td>No direct internet route; reachable only from inside</td></tr>
+            <tr><td>The drawbridge (internet access)</td><td>Internet Gateway (IGW)</td><td>The ONLY door between VPC and the public internet</td></tr>
+            <tr><td>A one-way delivery hatch</td><td>NAT Gateway</td><td>Lets inner-keep instances reach out (download packages) but blocks anyone reaching in</td></tr>
+            <tr><td>Guards at each room's door</td><td>Security Group (SG)</td><td>Stateful firewall per instance - "who may knock on this door"</td></tr>
+            <tr><td>The gatehouse receptionist</td><td>ALB (Load Balancer)</td><td>Public-facing; takes visitor requests and routes them inward</td></tr>
+        </table>
+        <div class="callout">
+            <strong>The one question that solves everything:</strong> For any two components, ask <em>"Does A need to initiate a connection to B? On what port? In which direction?"</em> Each "yes" becomes exactly one security group rule. That's it. Security groups are not mysterious - they are just the written-down answers to that question.
+        </div>
+    </div>
+
+    <div class="layer-box">
+        <h2>Layer 1 - Network Topology: Who Goes Public, Who Goes Private</h2>
+        <p>The guiding principle for placement: A component goes in a public subnet ONLY if it must be reached directly from the internet, OR if it must be the "jump point" to reach private things. Everything else goes private, minimizing the public surface - minimizing attack surface. This is the single most-tested idea in a DevOps architect course.</p>
+        
+        <h3>Public Subnet (the courtyard - minimal, exposed on purpose)</h3>
+        <table>
+            <tr><th>Component</th><th>Why public</th></tr>
+            <tr><td>ALB</td><td>Users on the internet hit it directly. It's the front door. (It only needs public subnets; the LB itself is a managed service.)</td></tr>
+            <tr><td>Bastion host (Jump box)</td><td>You (the admin) SSH into it from the internet, then hop to private instances. It's the controlled entry door.</td></tr>
+            <tr><td>NAT Gateway</td><td>Must live in a public subnet to forward private instances' outbound traffic to the IGW.</td></tr>
+        </table>
+
+        <h3>Private Subnet (the keep - everything that does real work)</h3>
+        <table>
+            <tr><th>Component</th><th>Why private</th></tr>
+            <tr><td>App servers (EC2)</td><td>Users never connect to them directly - only through the ALB. Keep them hidden.</td></tr>
+            <tr><td>Jenkins master + slave</td><td>CI/CD internals. No reason for the internet to reach them. (You access the UI via Bastion tunnel or VPN.)</td></tr>
+            <tr><td>Nexus / Nexus server</td><td>Internal artifact store.</td></tr>
+            <tr><td>SonarQube server</td><td>Internal code quality server.</td></tr>
+            <tr><td>Trivy server</td><td>Internal image scanner.</td></tr>
+            <tr><td>Ansible server</td><td>Reaches out to configure instances; nothing reaches in from the internet.</td></tr>
+            <tr><td>RDS</td><td>Database - the crown jewels. Never public.</td></tr>
+            <tr><td>Redis</td><td>Cache sitting in front of RDS - also internal.</td></tr>
+        </table>
+        <p><strong>S3 is special</strong> - It's not in your VPC at all. It's a regional AWS service reached either over the internet (via NAT) or, better, via a VPC Gateway Endpoint (a private tunnel from your VPC to S3 that never touches the internet). We'll revisit this in Layer 7.</p>
+
+        <h3>Bastion vs NAT (The two pieces that confuse everyone)</h3>
+        <p>They sound similar ("both are in public subnets, both bridge public and private") but they are opposites in direction:</p>
+        <pre>BASTION -> INBOUND door for admins:   You (Internet) --SSH--> Bastion --SSH--> Private EC2
+NAT GW  <- OUTBOUND door for servers: Private EC2 --yum/apt/docker pull--> NAT --> Internet</pre>
+        <p>Bastion lets humans get in to manage private boxes. NAT lets private boxes get out to download packages/pull Docker images - while blocking anyone from using that same path to get in. Your private app servers need NAT so Jenkins/Docker can docker pull the image from Docker Hub, and so yum update works. But NAT guarantees no outsider can ride that connection backwards.</p>
+
+        <h3>High Availability note (course graders love this)</h3>
+        <p>Spread across 2 Availability Zones. So really: 2 public subnets (one per AZ) - ALB spans both, NAT in each (or one to save cost). 2 private subnets (one per AZ) - App servers spread across both; RDS Multi-AZ.</p>
+        
+        <div class="mermaid">
+        graph TD
+            Internet((Internet)) --> IGW[IGW door]
+            IGW --> VPC
+            
+            subgraph VPC [VPC 10.0.0.0/16]
+                subgraph Public [PUBLIC SUBNETS AZ-A, AZ-B]
+                    ALB[ALB]
+                    Bastion[Bastion]
+                    NAT[NAT Gateway]
+                end
+                
+                subgraph Private [PRIVATE SUBNETS AZ-A, AZ-B]
+                    App[App Servers]
+                    Jenkins[Jenkins]
+                    Maven[Maven]
+                    Sonar[Sonar]
+                    Trivy[Trivy]
+                    Ansible[Ansible]
+                    Redis[(Redis)]
+                    RDS[(RDS)]
+                    
+                    App --> Redis
+                    Redis --> RDS
+                end
+                
+                ALB -- :8080 --> App
+                Bastion -- SSH --> Private
+                App -- outbound --> NAT
+            end
+            
+            Private -- S3 via VPC Gateway Endpoint - private --> S3[(S3 product images)]
+        </div>
+    </div>
+
+    <div class="layer-box">
+        <h2>Layer 2 - How the ALB Reaches a Private Server (The key insight)</h2>
+        <p>The confusion comes from a hidden assumption: "To reach a server, you need its public IP." That's true for the public internet, but false inside a VPC. Here's the correction:</p>
+        <div class="callout">
+            <strong>Insight: Inside a VPC, everything talks via PRIVATE IPs</strong><br>
+            Every instance in your VPC gets a private IP (e.g., 10.0.3.47) regardless of subnet. Within the VPC's CIDR (10.0.0.0/16), any instance can route to any other instance's private IP - the VPC is one big internal network. Public IPs are only needed to cross the IGW to the internet. They are irrelevant for internal VPC-to-VPC traffic.
+        </div>
+        <p>So the app server having no public IP doesn't matter - the ALB reaches it by its private IP, over the internal VPC network. The private subnet just means "no route to the internet gateway," not "unreachable from inside."</p>
+        
+        <h3>The chain, step by step</h3>
+        <ol>
+            <li><strong>User's browser</strong> --> DNS resolves your ALB's public DNS name (e.g. shop-alb-123.us-east-1.elb.amazonaws.com)</li>
+            <li><strong>Request hits the ALB</strong> (ALB lives in the PUBLIC subnet, has public-facing nodes). User &lt;-&gt; ALB connection terminates HERE. The user never sees what's behind.</li>
+            <li><strong>ALB consults its TARGET GROUP.</strong> A Target Group is just a LIST of registered targets: <code>app-server-1 @ 10.0.3.47 : 8080 (Healthy)</code>, <code>app-server-2 @ 10.0.4.88 : 8080 (Healthy)</code></li>
+            <li><strong>ALB opens a BRAND-NEW connection</strong> to one healthy target's PRIVATE IP:8080. This hop is entirely INSIDE the VPC = private IP is enough. This is ALLOWED because the app server's security group says: <em>"Allow inbound :8080 FROM the ALB's security group."</em></li>
+            <li>App server processes, replies to the ALB (stateful = reply auto-allowed).</li>
+            <li>ALB relays the response back to the user.</li>
+        </ol>
+
+        <h3>The mental model shift</h3>
+        <p>The ALB is a two-faced proxy:</p>
+        <pre>
+   PUBLIC FACE                    PRIVATE FACE
+   (listener)                     (Target group)
+ ----------------              -------------------
+| User--> :443   |             | --> 10.0.3.47:8080 |
+| public DNS     |  (relays)   | --> 10.0.4.88:8080 |
+ ----------------              -------------------
+        ^                               ^
+  Internet side                 VPC-internal side
+  (needs public)                (private IP is fine)</pre>
+        <p>The user's connection stops at the ALB. A second, independent connection goes from the ALB to the private target. The private subnet never touches the internet - the ALB is the bridge. This is exactly why private app servers are both reachable AND safe.</p>
+
+        <h3>The two things that make the hop work</h3>
+        <p><strong>Target Group registration</strong> - the app server (its private IP + port) MUST be registered as a target. (In autoscaling setups the ASG auto-registers new instances; manually you add them.)</p>
+        <p><strong>Security group rule</strong> - this is the elegant part. You don't hard-code the ALB's IP. You write: <code>App-Server-SG: Allow inbound TCP :8080 from source = ALB-SG</code></p>
+        <p>Referencing one SG as the source in another SG means "Any instance wearing the ALB security group may enter." Clean, and it survives IP changes. This SG-referencing-SG pattern is the professional way and graders look for it.</p>
+    </div>
+
+    <div class="layer-box">
+        <h2>Layer 3 - The Complete Security Group Table</h2>
+        <p>This is where the whole architecture becomes concrete. Remember the one question: "Who initiates a connection to whom, on what port?" Each row below is one answer. I'll name each SG, then give its inbound rules (Outbound stays at default "Allow All" unless noted - which is normal and fine for these).</p>
+
+        <h3>First, name your security groups (one per role, not per instance):</h3>
+        <ul>
+            <li><strong>alb-sg</strong>: The ALB</li>
+            <li><strong>bastion-sg</strong>: Bastion host</li>
+            <li><strong>app-sg</strong>: App servers</li>
+            <li><strong>jenkins-sg</strong>: Jenkins master + slave</li>
+            <li><strong>tools-sg</strong>: Maven/Nexus, Sonarqube, Trivy</li>
+            <li><strong>ansible-sg</strong>: Ansible server</li>
+            <li><strong>redis-sg</strong>: Redis</li>
+            <li><strong>rds-sg</strong>: RDS</li>
+        </ul>
+
+        <h3>The rules (Inbound):</h3>
+        <table>
+            <tr><th>SG Name / Role</th><th>Port</th><th>Source</th><th>Why</th></tr>
+            <tr><td rowspan="2"><strong>alb-sg</strong> (public front door)</td><td>80 (HTTP)</td><td>0.0.0.0/0</td><td>Public users (redirect to 443)</td></tr>
+            <tr><td>443 (HTTPS)</td><td>0.0.0.0/0</td><td>Public users (TLS)</td></tr>
+            <tr><td><strong>bastion-sg</strong> (admin jump box)</td><td>22 (SSH)</td><td>YOUR office/home IP /32 (NOT 0.0.0.0/0!)</td><td>Only you may SSH in</td></tr>
+            <tr><td rowspan="3"><strong>app-sg</strong> (the heart)</td><td>8080</td><td>alb-sg</td><td>ALB forwards user traffic in (SG-references-SG)</td></tr>
+            <tr><td>22</td><td>bastion-sg</td><td>Admin SSH via bastion</td></tr>
+            <tr><td>22</td><td>ansible-sg</td><td>Ansible configures these servers</td></tr>
+            <tr><td rowspan="4"><strong>jenkins-sg</strong> (CI/CD)</td><td>8080</td><td>bastion-sg</td><td>You reach Jenkins UI (via bastion tunnel)</td></tr>
+            <tr><td>22</td><td>bastion-sg</td><td>Admin SSH</td></tr>
+            <tr><td>22</td><td>ansible-sg</td><td>Ansible configures Jenkins</td></tr>
+            <tr><td>50000</td><td>jenkins-sg</td><td>Master&lt;-&gt;slave agent comms (self-reference)</td></tr>
+            <tr><td rowspan="3"><strong>tools-sg</strong> (Code tools)</td><td>9000 (Sonar)</td><td>jenkins-sg</td><td>Jenkins pushes code-quality analysis</td></tr>
+            <tr><td>8081 (Nexus)</td><td>jenkins-sg</td><td>Jenkins pulls/pushes artifacts</td></tr>
+            <tr><td>22</td><td>bastion-sg, ansible-sg</td><td>Admin + config</td></tr>
+            <tr><td><strong>ansible-sg</strong> (config server)</td><td>22</td><td>bastion-sg</td><td>You SSH in to run playbooks. (Ansible mostly makes OUTBOUND SSH connections - those need no inbound rule. Stateful.)</td></tr>
+            <tr><td><strong>redis-sg</strong> (the cache)</td><td>6379</td><td>app-sg</td><td>Only app servers may query the cache</td></tr>
+            <tr><td rowspan="2"><strong>rds-sg</strong> (crown jewels)</td><td>3306 (MySQL)</td><td>app-sg</td><td>App servers read/write DB</td></tr>
+            <tr><td>3306</td><td>redis-sg</td><td>(only if your cache layer writes back to DB)</td></tr>
+        </table>
+
+        <h3>Three principles baked into that table</h3>
+        <ul>
+            <li><strong>SG references SG, never raw IPs</strong> (except bastion's /32 and ALB's 0.0.0.0/0). This is the hallmark of a professional design - it's self-healing when IPs change.</li>
+            <li><strong>Least privilege</strong> - RDS accepts port 3306 only from app-sg/redis-sg, nothing else. No port is open "just in case."</li>
+            <li><strong>Bastion is the ONLY box with SSH from the internet</strong>, and only from your IP. Every other SSH rule sources from bastion-sg or ansible-sg. This is the "single hardened entry point" pattern.</li>
+        </ul>
+        <div class="warning">
+            <strong>A subtle trap to notice:</strong> Look at app-sg: it has no inbound rule from the internet at all - not even port 8080 from 0.0.0.0/0. The only way traffic enters is via alb-sg. That's precisely what makes "private app servers behind an ALB" secure. If you ever find yourself adding 0.0.0.0/0 to app-sg, you've broken the model.
+        </div>
+    </div>
+
+    <div class="layer-box">
+        <h2>Layer 4 - Health checks: How the ALB knows a Server is alive</h2>
+        <p>The problem health checks solve: The ALB has a list of targets (10.0.3.47:8080, 10.0.4.88:8080). But what if one app server crashes, or its container is mid-restart during a deploy? If the ALB blindly forwards a user to a dead server, the user gets an error. Health checks are the ALB continuously asking each target "are you OK?" and routing traffic ONLY to the ones that answer correctly.</p>
+
+        <h3>The mechanism</h3>
+        <p>The ALB (via the Target Group's health-check config) does this on a loop, per target:</p>
+        <pre>Every 10s: ALB --GET http://10.0.3.47:8080/health--> app server
+<-- 200 OK -------------------------------------- Healthy (keep routing)
+<-- 500 / timeout / no answer ------------------- Unhealthy (stop routing)</pre>
+
+        <h3>You configure these knobs on the Target Group:</h3>
+        <table>
+            <tr><th>Setting</th><th>Typical value</th><th>Meaning</th></tr>
+            <tr><td>Health check path</td><td>/health or /actuator/health</td><td>The URL the ALB pings</td></tr>
+            <tr><td>Port</td><td>8080 (traffic port)</td><td>Where to ping</td></tr>
+            <tr><td>Protocol</td><td>HTTP</td><td></td></tr>
+            <tr><td>Healthy threshold</td><td>2</td><td>2 consecutive passes = mark healthy</td></tr>
+            <tr><td>Unhealthy threshold</td><td>3</td><td>3 consecutive fails = mark unhealthy</td></tr>
+            <tr><td>Interval</td><td>30s</td><td>How often to ping</td></tr>
+            <tr><td>Timeout</td><td>5s</td><td>How long to wait for a reply</td></tr>
+            <tr><td>Success codes</td><td>200</td><td>What counts as "healthy"</td></tr>
+        </table>
+
+        <h3>Why this is deeply important for your CI/CD deploys</h3>
+        <p>Here's the connection to your Jenkins pipeline that most people miss. When Jenkins deploys a new image to app server 1:</p>
+        <ol>
+            <li>New container starts on app-server-1 -> takes ~20s to boot the JVM</li>
+            <li>During boot, /health returns 503 (app not ready) -> ALB marks it UNHEALTHY</li>
+            <li>ALB routes ALL users to app-server-2 (still healthy on old version) -> ZERO downtime</li>
+            <li>app-server-1 finishes booting -> /health returns 200 -> ALB marks HEALTHY again</li>
+            <li>Jenkins then deploys to app-server-2, same dance.</li>
+        </ol>
+        <p>This is a <strong>rolling deployment</strong> - and health checks are what make it safe. Without them, the ALB would send users to a half-booted server. So the health check isn't just monitoring; it's the traffic gate during deployments.</p>
+
+        <h3>The app must EXPOSE a health endpoint</h3>
+        <p>This is why - when we get to the code - your Java app will have a /health (or Spring Boot Actuator's /actuator/health) endpoint. The health check is a contract between your code and your infrastructure. A good /health endpoint ideally checks downstream dependencies too:</p>
+        <pre>GET /health -> { "status": "UP", "db": "UP", "redis": "UP" } -> 200
+                 (if DB is unreachable)                      -> 503</pre>
+        <p>That way, if an app server loses its DB connection, the ALB stops sending it traffic automatically.</p>
+
+        <div class="callout">
+            <strong>The one subtlety (SG dependency):</strong> For health checks to work, remember app-sg MUST allow inbound 8080 from alb-sg - the same rule that handles user traffic also lets the health-check probe through. One rule, two purposes. If you ever see all targets "unhealthy," the first thing to check is that SG rule.
+        </div>
+    </div>
+
+    <div class="layer-box">
+        <h2>Layer 5 - The Jenkins CI/CD flow</h2>
+        <p>Core idea first: CI/CD is just a relay race. Jenkins is the coordinator standing in the middle; it doesn't do the work itself - it tells each specialist tool to run, waits for a pass/fail, and only hands the baton forward if the previous runner succeeded. Your tools (Maven, Sonar, Trivy, ECR) are the runners. Jenkins holds the stopwatch.</p>
+        <p>You described two phases, which is exactly right and a very mature design - separate "build & push" from "deploy." Let me show why that separation matters, then the full stage flow.</p>
+
+        <h3>Why split into two phases (CI vs CD)</h3>
+        <p><strong>CI PHASE (Integration):</strong> code -> test -> quality -> scan -> BUILD IMAGE -> PUSH to registry<br>Produces an ARTIFACT (the image). Does NOT touch production.</p>
+        <p><strong>CD PHASE (Deployment):</strong> PULL image from registry -> deploy to app servers<br>Consumes the artifact. Touches production.</p>
+        <p>The artifact (a tagged image in ECR/Docker Hub) is the clear handoff point. Benefits:</p>
+        <ul>
+            <li>You can deploy the exact same tested image to staging, then prod - no rebuilding (rebuilding risks "works in staging, breaks in prod").</li>
+            <li>You can roll back by just re-deploying an older image tag.</li>
+            <li>The image is immutable - tagged with the build number/git SHA, so you always know exactly what's running.</li>
+        </ul>
+
+        <h3>The full pipeline stages</h3>
+        <div class="mermaid">
+        sequenceDiagram
+            participant Dev as Git/Webhook
+            participant Jenkins
+            participant Tools as Maven/Sonar/Trivy
+            participant Registry as ECR
+            participant CD as Ansible/AppServers
+            
+            note over Jenkins,Tools: --- CI PHASE ---
+            Dev->>Jenkins: 1. Checkout Code
+            Jenkins->>Tools: 2. Build + Unit Test (Maven)
+            Jenkins->>Tools: 3. Code Quality (SonarQube)
+            Tools-->>Jenkins: Wait for verdict (FAIL = Stop)
+            Jenkins->>Jenkins: 4. Build Image (Docker)
+            Jenkins->>Tools: 5. Scan Image (Trivy)
+            Tools-->>Jenkins: Find CVEs (HIGH = Fail)
+            Jenkins->>Registry: 6. Push Image
+            note right of Registry: Image tagged & immutable
+            
+            note over Jenkins,CD: --- CD PHASE ---
+            Jenkins->>CD: 7. Deploy Trigger
+            CD->>Registry: Pull Image
+            CD->>CD: Rolling deploy (Stop old, run new)
+        </div>
+
+        <h3>Who connects to whom in CI/CD (Ties back to your SGs!)</h3>
+        <table>
+            <tr><th>Connection</th><th>Port</th><th>SG rule that enables it</th></tr>
+            <tr><td>Git -> Jenkins (webhook)</td><td>8080</td><td>(via bastion/ngrok in a lab; in AWS, Git is external - needs care)</td></tr>
+            <tr><td>Jenkins -> Maven/Nexus</td><td>8081</td><td>tools-sg allows 8080 from jenkins-sg</td></tr>
+            <tr><td>Jenkins -> Sonarqube</td><td>9000</td><td>tools-sg allows 9000 from jenkins-sg</td></tr>
+            <tr><td>Jenkins -> Trivy</td><td>local</td><td>Trivy often runs on the Jenkins slave; or tools-sg from jenkins-sg</td></tr>
+            <tr><td>Jenkins/App -> ECR</td><td>443 (HTTPS)</td><td>outbound via NAT (or a VPC ECR endpoint - better)</td></tr>
+            <tr><td>Jenkins -> App servers (Deploy)</td><td>22</td><td>app-sg allows 22 from... Jenkins? Or Ansible? (Key question below)</td></tr>
+        </table>
+    </div>
+
+    <div class="layer-box">
+        <h2>The critical design decision: How does Jenkins deploy to private app servers?</h2>
+        <p>There are two schools:</p>
+        <p><strong>Option A - Jenkins SSHes directly to app servers (simpler, common in courses)</strong><br>
+        app-sg allows 22 from jenkins-sg.<br>
+        Jenkins runs ssh appserver "docker pull && docker run".</p>
+
+        <p><strong>Option B - Jenkins hands off to Ansible (cleaner, matches your plan since you want a separate Ansible server)</strong><br>
+        Jenkins calls the Ansible server; Ansible SSHes to app servers and runs the deploy playbook.<br>
+        app-sg allows 22 from ansible-sg (which we already have).<br>
+        Separation of concerns: Jenkins = orchestration, Ansible = configuration/deployment.<br>
+        Since you explicitly want a dedicated Ansible server, Option B is the right fit - and it's what we'll detail in Layer 6.</p>
+
+        <div class="callout">
+            <strong>One security note on ECR:</strong> When an app server does docker pull from ECR, it needs AWS credentials. DO NOT put access keys on the instance. Attach an IAM Role to the app-server EC2 (an "Instance Profile") granting ecr:GetDownloadUrlForLayer, ecr:BatchGetImage, etc. The instance then authenticates automatically. (Same IAM-role pattern will apply to S3 access later.) This "IAM roles not hardcoded keys" point is heavily graded.
+        </div>
+    </div>
+
+    <div class="layer-box">
+        <h2>Layer 6 - Ansible: Configuring Private Instances from a Dedicated Server</h2>
+        <p>Core idea: Ansible is agentless push-based configuration. Unlike tools that need an agent installed on each target, Ansible just needs SSH access + Python on the targets. The Ansible server (the "control node") pushes instructions out over SSH. There's nothing to install on the targets beyond Python (which comes with the OS).</p>
+        
+        <h3>The mental model</h3>
+        <div class="mermaid">
+        graph TD
+            subgraph ANSIBLE CONTROL NODE (private)
+                Inv[inventory file<br>-> list of target IPs + groups]
+                Play[playbooks .yml<br>-> what to do]
+                Key[SSH private key<br>-> how to authenticate]
+            end
+            
+            App1[app-srv-1 Python]
+            App2[app-srv-2 Python]
+            Jenk[jenkins Python]
+            
+            Inv -->|SSH port 22 = PUSH| App1
+            Play -->|SSH port 22 = PUSH| App2
+            Key -->|SSH port 22 = PUSH| Jenk
+        </div>
+
+        <h3>Why a SEPARATE Ansible server (your explicit requirement)</h3>
+        <p>You said you want a dedicated Ansible server, not running on the bastion. The reasoning (good to articulate in your course):</p>
+        <table>
+            <tr><th>Concern</th><th>Bastion host</th><th>Dedicated Ansible server</th></tr>
+            <tr><td>Role</td><td>Entry point for humans</td><td>Automation control node</td></tr>
+            <tr><td>Blast radius if compromised</td><td>Already internet-exposed on 22</td><td>Isolated, no inbound from internet</td></tr>
+            <tr><td>Separation of concerns</td><td>Mixing "human access" + "automation"</td><td>Clear single responsibility</td></tr>
+            <tr><td>Who holds the SSH keys to prod</td><td>Shouldn't be the public-facing box</td><td>The locked-down automation box</td></tr>
+        </table>
+        <p>Putting your deployment SSH keys (which can touch every private server) on the internet-facing bastion is a security smell. A dedicated private Ansible server keeps those powerful keys off the exposed box. That's the architectural justification.</p>
+
+        <h3>How Ansible reaches private targets - the connectivity</h3>
+        <p>Ansible server is in a private subnet. Its targets are also private. Same-VPC = private-IP routing works (Layer 2 insight again). The SG rules we already wrote make it work:</p>
+        <ul>
+            <li>app-sg allows 22 from ansible-sg √</li>
+            <li>jenkins-sg allows 22 from ansible-sg √</li>
+            <li>tools-sg allows 22 from ansible-sg √</li>
+        </ul>
+        <p>You reach the Ansible server itself via the bastion (ansible-sg allows 22 from bastion-sg), then run ansible-playbook.</p>
+
+        <h3>The three Ansible building blocks</h3>
+        <p><strong>1. INVENTORY (inventory.ini) - WHO to configure, grouped:</strong></p>
+        <pre><code class="language-ini">[app_servers]
+10.0.3.47
+10.0.4.88
+
+[jenkins]
+10.0.3.10
+
+[all:vars]
+ansible_user=ec2-user
+ansible_ssh_private_key_file=~/.ssh/deploy_key.pem</code></pre>
+
+        <p><strong>2. PLAYBOOK (deploy.yml) - WHAT to do (declarative, idempotent):</strong></p>
+        <pre><code class="language-yaml">- hosts: app_servers
+  tasks:
+    - name: Ensure Docker is installed
+    - name: Log in to ECR
+    - name: Pull image myapp:{{ build_number }}
+    - name: Stop old container
+    - name: Run new container</code></pre>
+        <p><strong>3. ROLES</strong> - reusable bundles of tasks (optional, for larger setups).</p>
+
+        <p><strong>The key property: Idempotency</strong><br>
+        Ansible playbooks are declarative - you describe the desired end state, not the steps. "Ensure Docker is installed" = if already installed, Ansible does nothing; if not, it installs it. Running the same playbook twice is safe and produces the same result. This is why Ansible is used for both initial setup and repeated deploys.</p>
+
+        <h3>How this plugs into Jenkins (the handoff)</h3>
+        <p>Your CD phase, Option B from Layer 5. Jenkins CD stage:</p>
+        <pre><code>sshagent -> ssh ansible-server \
+  "ansible-playbook deploy.yml -e build_number=${BUILD_NUMBER}"</code></pre>
+        <p>Ansible server then: SSHes to each app server (one at a time), pulls myapp:${BUILD_NUMBER} from ECR, swaps the container, moves to next server (rolling deploy).</p>
+        <p>So the full chain of trust: <strong>Jenkins -> (SSH) -> Ansible server -> (SSH) -> app servers</strong>. Jenkins never touches the app servers directly; Ansible is the sole deployment hand. Clean separation.</p>
+        
+        <p><strong>What Ansible configures in the initial setup (vs ongoing deploys):</strong><br>
+        Initial (run once per server): Install Docker, configure the OS, set up log forwarding, install the CloudWatch agent, harden SSH.<br>
+        Ongoing (every deploy): pull new image, restart container.</p>
+    </div>
+
+    <div class="layer-box">
+        <h2>Layer 7 - The Data Layer: RDS, Redis, and S3</h2>
+        <p>Three different kinds of "storage," each solving a different problem. The mistake beginners make is treating them as interchangeable. Let me separate their purposes first.</p>
+        <table>
+            <tr><th>Store</th><th>Holds</th><th>Access pattern</th><th>Why</th></tr>
+            <tr><td>RDS (MySQL/Postgres)</td><td>Structured, relational data: users, orders, product records, prices</td><td>Read + write, must be durable & consistent</td><td>Source of truth</td></tr>
+            <tr><td>Redis</td><td>Temporary copies of frequently-read data; sessions</td><td>Very fast read/write, in-memory, can be lost</td><td>Speed</td></tr>
+            <tr><td>S3</td><td>Large binary blobs: product images</td><td>Read-heavy, served to users</td><td>Cheap, scalable object storage</td></tr>
+        </table>
+
+        <h3>Why Redis sits "between" app servers and RDS (the caching pattern)</h3>
+        <p>You asked specifically about this. The reason is RDS is relatively slow and expensive per query; Redis is in-memory and ~100x faster. For an eCommerce site, the same product ("iPhone 15, $999, 20 in stock") gets read thousands of times but changes rarely. Hitting RDS every time wastes it.</p>
+        
+        <p><strong>The pattern is cache-aside (lazy loading):</strong></p>
+        <div class="mermaid">
+        flowchart TD
+            App[App Server needs product #42] --> RCheck{Check Redis first}
+            RCheck -->|HIT: Returns instantly| Done[Done. RDS untouched]
+            RCheck -->|MISS| RDS[App queries RDS]
+            RDS -->|Returns product| RSet[App sets product in Redis TTL=5min]
+            RSet --> AppRet[App returns product]
+        </div>
+        <p>Next 1000 requests for product #42 -> all HIT Redis -> RDS load drops ~99%.</p>
+        <p>So Redis isn't literally a network hop in the middle - the app talks to both. Redis is "in between" logically: the app checks Redis first, falls back to RDS. Mental correction worth internalizing: the app orchestrates the cache; Redis doesn't proxy to RDS. Redis has no idea RDS exists.</p>
+        <p>This is why in Layer 3, both redis-sg (6379 from app-sg) and rds-sg (3306 from app-sg) source from the app servers - the app connects to each independently.</p>
+
+        <h3>Why RDS and Redis are BOTH private</h3>
+        <p>Neither should ever have a public IP. The database is your crown jewels; the cache may hold session tokens. Only app-sg can reach them. RDS also uses a DB Subnet Group (a set of private subnets across AZs) so it can do Multi-AZ failover - a standby replica in another AZ that takes over if the primary dies.</p>
+
+        <h3>S3 - the odd one out (not in your VPC)</h3>
+        <p>S3 isn't an EC2 or a subnet thing - it's a regional AWS service with its own endpoint. Your product images live there because:</p>
+        <ul>
+            <li>Storing images in RDS is a classic anti-pattern (bloats the DB, slow, expensive).</li>
+            <li>Storing images on the app server's disk breaks when you have multiple app servers (image uploaded to server 1 isn't on server 2).</li>
+            <li>S3 is shared, durable, infinitely scalable - all app servers see the same images.</li>
+        </ul>
+
+        <p>Two ways the app reaches S3 (an important design choice):</p>
+        <ol>
+            <li><strong>App -> S3 via NAT Gateway</strong> (traffic leaves VPC, goes over AWS network to S3) - Works, but incurs NAT data charges and leaves the VPC.</li>
+            <li><strong>App -> S3 via VPC GATEWAY ENDPOINT (BETTER)</strong> - A private route from your VPC directly to S3. Never traverses the internet or NAT. Free, more secure. You add a route in the private subnet's route table pointing S3's prefix-list to the endpoint.</li>
+        </ol>
+        <p><em>Graders love the VPC endpoint answer because it's the secure + cost-optimal choice.</em></p>
+        <p><strong>How the app authenticates to S3:</strong> same IAM-role pattern as ECR - attach an IAM Instance Profile to the app servers granting <code>s3:GetObject</code> (and <code>s3:PutObject</code> if users upload images) on your bucket. No access keys in code.</p>
+
+        <h3>How images actually get served (a common confusion)</h3>
+        <p>Two models:</p>
+        <ul>
+            <li><strong>App proxies the image:</strong> user -> ALB -> app -> S3 -> app -> user. Simple, but app does heavy lifting.</li>
+            <li><strong>Pre-signed URL / CloudFront (better):</strong> app generates a temporary signed S3 URL (or a CloudFront CDN URL), returns it to the browser, and the browser fetches the image directly from S3/CloudFront. App never touches the image bytes. Scales far better.</li>
+        </ul>
+        <p>For your course, mention the pre-signed URL / CloudFront approach as the production-grade answer.</p>
+        <p>That completes the conceptual architecture. You now have the full mental model: network -> traffic -> security -> health -> CI/CD -> config -> data.</p>
+    </div>
+
+    <div class="layer-box">
+        <h2>Breadth - From Static EC2 to an Auto Scaling Group</h2>
+        <p>The problem ASG solves: Right now you have fixed app servers - say two, with hand-written private IPs in the ALB target group and the Ansible inventory. Two failures hide here: If one server dies, you're down to one until a human notices and rebuilds it. If traffic spikes (a sale), two servers can't cope, and if traffic is quiet at 3 AM you're paying for idle servers.</p>
+        <p>An Auto Scaling Group (ASG) makes the fleet elastic and self-healing: it maintains a desired count of identical servers, replaces dead ones automatically, and grows/shrinks with load.</p>
+
+        <h3>The key mental shift: from "pets" to "cattle"</h3>
+        <table>
+            <tr><th>PETS (what you have now)</th><th>CATTLE (what ASG gives you)</th></tr>
+            <tr><td>Named servers: app-srv-1,2</td><td>Anonymous, interchangeable instances</td></tr>
+            <tr><td>Hand-configured, nursed back</td><td>If sick, killed & replaced, not healed</td></tr>
+            <tr><td>IPs hardcoded in target group</td><td>Auto-registered/deregistered by ASG</td></tr>
+            <tr><td>Scale = you launch a new box</td><td>Scale = change a number / a policy fires</td></tr>
+        </table>
+        <p>Your servers stop being individuals you care for and become a herd defined by a template. This is the cloud-native shift.</p>
+
+        <h3>The three pieces of an ASG</h3>
+        <ol>
+            <li><strong>LAUNCH TEMPLATE</strong> - the "cookie cutter": AMI, instance type, SG, IAM role, and a user-data script that boots the app on startup. Every instance ASG creates is stamped from this.</li>
+            <li><strong>AUTO SCALING GROUP</strong> - the controller: "Keep N healthy instances across these private subnets, registered to this target group."</li>
+            <li><strong>SCALING POLICY</strong> - the rule for N: "If avg CPU > 60% for 3 min, add an instance; if < 20%, remove one." (Target-tracking.)</li>
+        </ol>
+
+        <h3>How this rewires what you already learned</h3>
+        <table>
+            <tr><th>You learned (Layer)</th><th>How ASG uses it</th></tr>
+            <tr><td>Target group (Layer 2)</td><td>ASG auto-registers each new instance's private IP into the target group, and deregisters on termination. You never touch IPs again.</td></tr>
+            <tr><td>Health check (Layer 4)</td><td>ASG uses the ALB health check to decide "is this instance healthy?" An unhealthy instance is terminated and replaced - self-healing.</td></tr>
+            <tr><td>Immutable Image (Layer 5)</td><td>The launch template's user-data does docker pull &lt;image&gt; - the exact tested artifact. Scaling = launching more copies of the same image.</td></tr>
+        </table>
+
+        <h3>The one subtlety that trips people: how does a brand-new ASG instance get the app?</h3>
+        <p>Two models - this is a real design decision:</p>
+        <p><strong>A. BAKED AMI (immutable infra)</strong> - Pre-build an AMI that already has Docker + the image. Launch template just starts it. Fast boot, no deploy-time dependencies.</p>
+        <p><strong>B. USER-DATA bootstrap</strong> - Launch template's user-data script runs on first boot: install Docker, docker pull the image, docker run. Slower boot, more flexible.</p>
+        <p>Your Ansible-based deploy fits a hybrid: bake Docker + agents into the AMI, let user-data pull the current image tag. The health check then gates the new instance into the target group exactly as before.</p>
+
+        <h3>Breadth Deliverable - ASG via Console / CLI (no Terraform)</h3>
+        <p>The 3 objects to create, in order:</p>
+        <p><strong>1. Launch Template (The cookie cutter)</strong><br>
+        AMI: Amazon Linux 2023 | Instance type: t3.small | Security group: app-sg | IAM instance profile: the role with ECR-pull + S3-read + CloudWatch-push<br>
+        Advanced -> user data - this is the critical field that makes a fresh instance self-install the app:</p>
+        <pre><code class="language-bash">#!/bin/bash
+set -e
+yum update -y
+yum install -y docker amazon-cloudwatch-agent
+systemctl enable --now docker
+
+# IAM role logs us into ECR (no keys)
+aws ecr get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+
+# Pull the exact tested image (immutable artifact, Layer 5) and run it
+docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/ecommerce:LATEST_TAG
+docker run -d --restart always --name ecommerce -p 8080:8080 \
+  -e DB_HOST=shop-db.xxxx.rds.amazonaws.com \
+  -e REDIS_HOST=shop-cache.xxxx.cache.amazonaws.com \
+  -e S3_BUCKET=ecommerce-product-images \
+  -e AWS_REGION=us-east-1 \
+  123456789012.dkr.ecr.us-east-1.amazonaws.com/ecommerce:LATEST_TAG</code></pre>
+
+        <p><strong>2. Auto Scaling Group</strong><br>
+        Launch template: the one above | Subnets: your two private subnets | Attach to existing load balancer -> select your target group | Health check type: ELB | Health check grace period: 60s | Group size: desired 2, min 2, max 6</p>
+
+        <p><strong>3. Scaling policy</strong><br>
+        Type: Target tracking | Metric: Average CPU utilization, target 60 (Better for web: ALB request count per target, target ~1000)</p>
+
+        <p><strong>Equivalent AWS CLI:</strong></p>
+        <pre><code class="language-bash"># 1. launch template (user-data must be base64-encoded in a file)
+aws ec2 create-launch-template \
+  --launch-template-name ecommerce-app \
+  --launch-template-data file://lt-data.json
+
+# 2. ASG wired to the target group, ELB health check
+aws autoscaling create-auto-scaling-group \
+  --auto-scaling-group-name ecommerce-asg \
+  --launch-template "LaunchTemplateName=ecommerce-app,Version=$Latest" \
+  --min-size 2 --max-size 6 --desired-capacity 2 \
+  --vpc-zone-identifier "subnet-aaa,subnet-bbb" \
+  --target-group-arns arn:aws:elasticloadbalancing:...:targetgroup/ecommerce-tg/xxxx \
+  --health-check-type ELB --health-check-grace-period 60
+
+# 3. Target-tracking scaling policy on CPU
+aws autoscaling put-scaling-policy \
+  --auto-scaling-group-name ecommerce-asg \
+  --policy-name cpu-target-60 \
+  --policy-type TargetTrackingScaling \
+  --target-tracking-configuration '{
+      "PredefinedMetricSpecification":{"PredefinedMetricType":"ASGAverageCPUUtilization"},
+      "TargetValue":60.0 }'</code></pre>
+
+        <h3>How your existing design changes with ASG</h3>
+        <ul>
+            <li><strong>ALB Target group:</strong> stop manually registering IPs - the ASG does it.</li>
+            <li><strong>Ansible Inventory:</strong> A static IP list no longer works. Use <code>aws_ec2</code> dynamic inventory instead of the hardcoded inventory.ini.</li>
+            <li><strong>Deploys:</strong> two valid approaches - (A) instance refresh (update the launch template's image tag -> ASG rolls new instances in, old ones out), or (B) keep Ansible but target the dynamic inventory. Instance refresh is the more "cattle" approach.</li>
+        </ul>
+    </div>
+
+    <div class="layer-box">
+        <h2>Application - The Observability Concept</h2>
+        <p>The core question observability answers: "Is the system healthy, and if not, where and why?" You already built the first primitive - the health check. Observability scales that from "one yes/no probe" to "continuous, queryable insight."</p>
+
+        <h3>The observability triangle (three pillars)</h3>
+        <table>
+            <tr><th>METRICS</th><th>LOGS</th><th>TRACES</th></tr>
+            <tr><td>Numbers over time</td><td>Discrete event records</td><td>One request's journey</td></tr>
+            <tr><td>"CPU 70%, 5xx=12"</td><td>"ERROR: DB timeout"</td><td>across all services</td></tr>
+            <tr><td>Cheap, aggregate</td><td>Detailed, searchable</td><td>Shows WHERE latency is</td></tr>
+            <tr><td>-> ALARMS fire here</td><td>-> root-cause the why</td><td>-> distributed systems</td></tr>
+        </table>
+        <p>Metrics tell you something is wrong (and trigger alarms). Logs tell you what exactly happened. Traces tell you where in the request path it happened. For your project, CloudWatch gives you metrics + logs + dashboards + alarms out of the box.</p>
+
+        <h3>The Four Golden Signals (what to actually watch)</h3>
+        <p>Google's SRE framework - memorize these; they're the "what to monitor" answer graders want:</p>
+        <table>
+            <tr><th>Signal</th><th>Question</th><th>Your metric</th></tr>
+            <tr><td>Latency</td><td>How slow?</td><td>ALB TargetResponseTime</td></tr>
+            <tr><td>Traffic</td><td>How much demand?</td><td>ALB RequestCount</td></tr>
+            <tr><td>Errors</td><td>How often failing?</td><td>ALB HTTPCode_Target_5XX_Count</td></tr>
+            <tr><td>Saturation</td><td>How full?</td><td>EC2 CPUUtilization, Memory</td></tr>
+        </table>
+
+        <h3>The metrics that matter for YOUR architecture (free from AWS)</h3>
+        <ul>
+            <li><strong>From the ALB:</strong> HTTPCode_Target_5XX_Count -> app errors (golden: Errors), TargetResponseTime -> latency (golden: Latency), RequestCount -> traffic (golden: Traffic), HealthyHostCount / UnHealthyHostCount -> how many app servers are alive, RejectedConnectionCount -> ALB overwhelmed</li>
+            <li><strong>From the ASG / EC2:</strong> CPUUtilization -> saturation = drives scaling, GroupInServiceInstances -> is the fleet at desired size?</li>
+            <li><strong>From your APP (custom metrics you emit):</strong> cache.hit / cache.miss ratio -> is Redis actually helping? (ties to Layer 7)</li>
+        </ul>
+        <p>That last one is special - you emit it from the app (Spring Boot Actuator + Micrometer already expose cache stats). A low cache-hit ratio means Redis isn't earning its keep. This connects observability directly back to the data-layer design you learned.</p>
+
+        <h3>The alerting mental model</h3>
+        <p>A metric alone is passive. An alarm watches a metric and acts when it crosses a threshold for a duration: <code>ALARM: metric + threshold + period = action</code> (e.g., 5XX count > 10 for 5 min -> send SNS -> email/Slack/PagerDuty)</p>
+        <p>Three alarms you'd set for this app:</p>
+        <ol>
+            <li><code>UnHealthyHostCount >= 1</code> for 2 min = an app server is down (self-healing may be in progress, but you want to know).</li>
+            <li><code>5XX count > 10</code> for 5 min = the app is erroring even on healthy hosts.</li>
+            <li><code>TargetResponseTime > 2s (p95)</code> for 5 min = latency degradation (maybe Redis down = every request hitting RDS).</li>
+        </ol>
+        <p>Notice alarm #3 would catch a Redis outage - because losing the cache makes every read hit the slower RDS, and latency climbs. Observability lets you see your architecture's assumptions holding or breaking.</p>
+    </div>
+
+    <div class="layer-box">
+        <h2>What the Maven Surefire plugin is</h2>
+        <p><strong>Definition</strong> - Surefire is the Maven plugin that executes your unit tests during the test phase of the build lifecycle. When you run <code>mvn test</code> or <code>mvn package</code>, Maven delegates to Surefire to find your test classes, run them, and produce reports.</p>
+        <p><strong>Why it matters (the problem it solves)</strong> - Without it, "building" your JAR would just compile code. Surefire is the gate that says "compile succeeded AND every unit test passed" before an artifact is produced. In your Jenkinsfile, the Build & Unit Test stage relies on Surefire - if a test fails, Surefire fails the build, the pipeline stops, and no broken image ever reaches ECR. That is the first quality gate in your CI/CD chain (SonarQube and Trivy are the later gates).</p>
+        
+        <p>Mental model - think of the build lifecycle as a conveyor belt:</p>
+        <pre>compile ---> test (Surefire) ---> package ---> ...
+             |                      |
+             any test fails = belt stops = no JAR, no image</pre>
+
+        <h3>The two sibling plugins (easy to confuse):</h3>
+        <table>
+            <tr><th>Plugin</th><th>Phase</th><th>Runs</th><th>Naming convention it looks for</th></tr>
+            <tr><td>Surefire</td><td>test</td><td>unit tests (fast, isolated)</td><td>*Test.java, Test*.java, *TestCase.java</td></tr>
+            <tr><td>Failsafe</td><td>integration-test / verify</td><td>integration tests (slower, real deps)</td><td>*IT.java, IT*.java</td></tr>
+        </table>
+        <p>Failsafe exists so a failing integration test doesn't abort the build before cleanup runs - it reports at the verify phase instead. For your project, Surefire is the one that matters right now.</p>
+        <p>A subtle point worth knowing - Spring Boot's parent POM already pulls in Surefire transitively, which is why <code>mvn test</code> works even though you never declared it. So "adding it" really means declaring it explicitly to pin the version and configure it (reports, which tests to include, fail-fast behavior) - making the build reproducible rather than relying on whatever version the parent happens to inherit.</p>
+
+        <h3>What you just gained with the three plugins in pom.xml</h3>
+        <table>
+            <tr><th>Command/Phase</th><th>Which plugin fires</th><th>Produces</th></tr>
+            <tr><td>mvn test</td><td>test (Surefire + JaCoCo prepare-agent + report)</td><td>test results + target/site/jacoco/jacoco.xml</td></tr>
+            <tr><td>mvn verify</td><td>integration-test, verify (adds Failsafe)</td><td>integration-test results</td></tr>
+            <tr><td>mvn package</td><td>package All above, then fat-jar</td><td>target/ecommerce-1.0.0.jar</td></tr>
+        </table>
+        <p>Key invariant to remember: JaCoCo's prepare-agent must run before Surefire, which is why it binds to the lifecycle early - it instruments the JVM so that when Surefire runs your tests, coverage is recorded. The report execution then runs after, writing the XML that SonarQube reads.</p>
+        <p><strong>One connection worth making to your Jenkinsfile:</strong> Your SonarQube stage can now point at the JaCoCo report: <code>-Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml</code>. That's the thread that ties Surefire + JaCoCo -> the SonarQube quality gate into one unbroken chain: tests run, coverage is measured, and Sonar can fail the build IF coverage drops below your gate's threshold - exactly the "no broken image reaches ECR" principle from Layer 5.</p>
+    </div>
+
+    <div class="layer-box">
+        <h2>Jenkins slave mental model (The single most misunderstood part of CI/CD)</h2>
+        <p>The Jenkins slave does almost everything itself. It does NOT "forward" the code to the SonarQube, Trivy, or Maven servers. Instead, the slave runs client tools that reach OUT to those servers over the network and send them data. Let me correct the mental picture, because the phrase "forward the code to the Maven/Sonar/Trivy servers" hides the real architecture.</p>
+
+        <h3>The key reframing: "Server" means two very different things here</h3>
+        <table>
+            <tr><th>Thing</th><th>Is it a place code gets sent to?</th><th>What actually happens</th></tr>
+            <tr><td>"Maven server"</td><td>❌ No</td><td>Maven is a tool installed on the slave. The slave runs `mvn` locally on the code it checked out. (A "Maven server" usually means Nexus/Artifactory - a repo the slave downloads dependencies from and uploads the built jar to.)</td></tr>
+            <tr><td>SonarQube server</td><td>⚠️ Partly</td><td>The slave runs the sonar-scanner client locally, which analyzes the code and sends the analysis results (not the raw repo) to the SonarQube server, which stores them and computes the quality gate.</td></tr>
+            <tr><td>Trivy</td><td>❌ Mostly No</td><td>Trivy is a scanner tool the slave runs locally on the built image. It only reaches out to a server to download its vulnerability database.</td></tr>
+        </table>
+        <p>So the real flow is "the slave is the worker; the servers are services it calls." Nothing gets "handed off" to be processed elsewhere - the slave orchestrates everything from one working directory.</p>
+
+        <h3>The mental model: A chef in a kitchen</h3>
+        <div class="mermaid">
+        graph LR
+            subgraph Jenkins Slave "The Chef's Kitchen (one working directory holds ALL the code)"
+                Code[Git Clone]
+                Mvn[mvn package runs locally]
+                Sonar[sonar-scanner runs locally]
+                Trivy[trivy image runs locally]
+                
+                Code --> Mvn
+                Code --> Sonar
+                Code --> Trivy
+            end
+            
+            Nexus[Nexus Maven server]
+            SonarServer[SonarQube Server]
+            TrivyDB[Trivy DB Server]
+            
+            Mvn -->|calls out to pull deps/push jar| Nexus
+            Sonar -->|sends analysis to| SonarServer
+            Trivy -->|pulls CVE DB from| TrivyDB
+        </div>
+        <p>The chef (slave) never ships the raw ingredients (code) to another kitchen. The chef uses tools and phones out to suppliers (servers) for ingredients and inspections.</p>
+
+        <h3>"What makes it know which tasks and where the servers are?"</h3>
+        <ol>
+            <li><strong>WHICH tasks, in what order -> the Jenkinsfile:</strong> Your Jenkinsfile is the recipe. Each stage <code>{ }</code> is one task, and they run top-to-bottom. That's the only thing deciding what gets done and in what sequence. Jenkins reads this file from your git repo.</li>
+            <li><strong>WHERE the slave runs -> the agent directive + Jenkins labels:</strong> When you register a slave, you give it a label (e.g. <code>linux-builder</code>). In the Jenkinsfile you write <code>agent { label 'linux-builder' }</code>. Jenkins' master matches the label to a registered node and dispatches the whole pipeline there. That is how "the code lands on the slave."</li>
+            <li><strong>WHERE the external servers live -> credentials + URLs, NOT hardcoded in logic:</strong> The slave needs the address of SonarQube, Nexus, etc. These come from Environment variables / config (<code>SONAR_HOST_URL</code>, the Nexus URL in your <code>pom.xml</code> <code>&lt;distributionManagement&gt;</code>) or Jenkins Credentials store injected via <code>withCredentials</code>. So the slave "knows where SonarQube is" because the Jenkinsfile hands sonar-scanner a <code>-Dsonar.host.url=https://sonar.internal:9000</code>. There's no magic discovery - it's configuration.</li>
+        </ol>
+        <p><strong>Tying it to the network layers:</strong> For the slave to reach these servers: Slave SG -> outbound to SonarQube SG on :9000, Nexus on :8081, ECR on :443. Each server's SG has an inbound rule sourced from the slave's SG (the SG-references-SG pattern you nailed in Layer 3).</p>
+    </div>
+
+    <div class="layer-box">
+        <h2>Application Code Logic: Redis & S3</h2>
+        <h3>Question 1: How do app servers reach Redis for their queries?</h3>
+        <p>Here's the surprise that trips everyone up: there is no line of code in <code>ProductService</code> that says "connect to Redis" or "query Redis." That's the whole point of Spring's abstraction. Reaching Redis is split across three places - config, enablement, and a single annotation.</p>
+
+        <p><strong>Piece 1 - WHERE Redis is (the address) -> <code>application.yml</code></strong></p>
+        <pre><code class="language-yaml">data:
+  redis:
+    host: ${REDIS_HOST:localhost}  # <- line 29: the Elasticache endpoint
+    port: ${REDIS_PORT:6379}       # <- line 30
+cache:
+  type: redis                      # <- line 32: "use Redis as the cache backend"</code></pre>
+        <p>This is the only place the Redis location lives. In production you set <code>REDIS_HOST=my-cluster.xxxx.cache.amazonaws.com</code> as an env var (via Ansible/the container run command), and the same image points at the real ElastiCache. That's the immutable-image principle. Spring Boot reads these properties at startup and auto-builds a RedisConnectionFactory - the actual TCP client to Redis on port 6379.</p>
+
+        <p><strong>Piece 2 - Turn caching ON -> <code>EcommerceApplication.java</code> (<code>@EnableCaching</code>)</strong><br>
+        Without <code>@EnableCaching</code>, the <code>@Cacheable</code> annotation is inert - Spring ignores it. This annotation installs the proxy layer that intercepts cached method calls.</p>
+
+        <p><strong>Piece 3 - WHEN to reach Redis -> <code>ProductService.java</code> line 29</strong></p>
+        <pre><code class="language-java">@Cacheable(value = "products", key = "#id")  // <- THIS line is the Redis query
+public Product getProduct(Long id) {
+    return repository.findById(id).orElse(null);  // <- this hits RDS (only on MISS)
+}</code></pre>
+        <p>This single annotation IS the Redis interaction. Here's the exact mechanism, step by step:</p>
+        <pre>Someone calls productService.getProduct(42)
+  |
+  v
+Spring's caching PROXY intercepts the call BEFORE your method body runs
+  |
+  |-- builds the key "products::42"
+  |-- sends GET products::42 ---------------> REDIS (port 6379)
+  |
+  -------------------------
+  | HIT                   | MISS
+  v                       v
+returns cached Product  runs your method body:
+your method NEVER runs  repository.findById(42) --> RDS (port 3306)
+RDS is NEVER touched    then proxy does SET products::42 --> REDIS
+                        (with the 5-min TTL from line 34)</pre>
+
+        <p>The precise answer to "how do app servers reach Redis":</p>
+        <ul>
+            <li>The TCP connection is created by Spring Boot at startup from the <code>application.yml</code> host/port.</li>
+            <li>The decision to talk to Redis happens inside the caching proxy that <code>@Cacheable</code> installs.</li>
+            <li>Your code never writes <code>redis.get(...)</code> - Spring writes that plumbing for you. The annotation is a declaration ("cache this"), and the framework turns it into the actual GET/SET network calls.</li>
+        </ul>
+
+        <p>The write side keeps the cache honest - <code>ProductService.java</code> line 57:</p>
+        <pre><code class="language-java">@CacheEvict(value = "products", key = "#product.id")  // sends DEL products::id to Redis
+public Product saveProduct(Product product) {
+    return repository.save(product);                  // writes to RDS
+}</code></pre>
+        <p>When a product changes, <code>@CacheEvict</code> fires a DEL to Redis so the stale copy is removed; the next read MISSes and repopulates from RDS.</p>
+
+        <h3>Question 2: How does S3 serve product images, and how do they get matched to the right product?</h3>
+        <p>The key insight: the image bytes never pass through your app server. The app only hands out a link. Here's the full stitch, traced through four files.</p>
+        <p>The link that joins a product to its image: <code>imageKey</code>. The matching happens through one field on the Product - <code>Product.java</code> line 30:</p>
+        <pre><code class="language-java">private String imageKey;  // e.g. "iphone15.jpg" - the S3 object key</code></pre>
+        <p>This string is stored in the RDS row right next to the product's name and price. So RDS already knows "product 42's image is the S3 object named iphone15.jpg." That's the join - the product record carries the filename of its own image.</p>
+
+        <p><strong>The full stitch, step by step through the code:</strong></p>
+        <ol>
+            <li>Request arrives -> <code>ProductController.java</code> line 42: <code>@GetMapping("/{id}") public ResponseEntity&lt;Map&lt;String, Object&gt;&gt; one(@PathVariable Long id) {</code></li>
+            <li>Fetch the product info (via Redis/RDS from Question 1) -> line 43: <code>Product product = productService.getProduct(id);</code> (Now the app holds the product, including <code>product.getImageKey()</code> = "iphone15.jpg").</li>
+            <li>Turn the key into a temporary S3 URL -> line 50: <code>body.put("imageUrl", s3Service.getImageUrl(product.getImageKey()));</code>. This calls into <code>S3Service.getImageUrl()</code> line 42, which takes the bucket (from application.yml) + the imageKey, builds a pre-signed GET URL valid for 10 minutes, and returns something like <code>https://ecommerce-product-images...</code></li>
+            <li>Respond with product info + image link -> line 48-50. The JSON the browser receives:<pre><code class="language-json">{
+  "product": { "id": 42, "name": "iPhone 15", "price": 999, "imageKey": "iphone15.jpg" },
+  "imageUrl": "https://ecommerce-product-images.s3.amazonaws.com/iphone15.jpg?X-Amz-Signature=..."
+}</code></pre></li>
+            <li>The browser fetches the image directly from S3. Your HTML would do <code>&lt;img src="{imageUrl}"&gt;</code>. The browser makes a separate request straight to S3 - your app server is completely out of that path.</li>
+        </ol>
+
+        <p><strong>Why pre-signed URLs (the "why" behind the design):</strong><br>
+        NAIVE way: Browser -> App server -> downloads image from S3 -> streams to browser (app server wastes CPU/bandwidth proxying bytes; slow, doesn't scale).<br>
+        THIS way: Browser -> App server -> gets a signed URL (tiny string). Browser -> S3 directly -> image bytes (app only hands out a link; S3 serves the heavy bytes).</p>
+
+        <p>And the credentials for signing come from the IAM role, not keys - <code>S3Service.java</code> line 37: <code>.credentialsProvider(DefaultCredentialsProvider.create()) // uses the EC2 instance's IAM role</code>. No access keys anywhere in the code - the app server's attached IAM role grants <code>s3:GetObject</code>, and the SDK picks it up automatically.</p>
+
+        <p><strong>The complete picture - RDS and S3 collaborate:</strong></p>
+        <div class="mermaid">
+        graph TD
+            RDS[RDS row 42: name:'iPhone 15', price:999, imageKey:'iphone15.jpg']
+            App[product.getImageKey]
+            S3Service[S3Service signs]
+            S3Obj[S3 object: s3://ecommerce-product-images/iphone15.jpg]
+            URL[pre-signed URL]
+            Browser[Browser fetches bytes from S3]
+            
+            RDS -->|reads info & imageKey| App
+            App --> S3Service
+            S3Service --> URL
+            S3Obj -.->|bytes served directly| Browser
+            URL -->|gives src=...| Browser
+        </div>
+        <p>RDS holds the info and the filename; S3 holds the bytes; the <code>imageKey</code> field is the glue. The product and its image are matched because the product row literally stores the name of its own S3 object.</p>
+    </div>
+
+</body>
+</html>

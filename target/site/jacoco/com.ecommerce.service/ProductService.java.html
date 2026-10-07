@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ProductService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">ecommerce</a> &gt; <a href="index.source.html" class="el_package">com.ecommerce.service</a> &gt; <span class="el_source">ProductService.java</span></div><h1>ProductService.java</h1><pre class="source lang-java linenums">package com.ecommerce.service;
+
+import com.ecommerce.model.Product;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+public class ProductService {
+
+    private final ProductRepository repository;
+
+<span class="fc" id="L15">    public ProductService(ProductRepository repository) {</span>
+<span class="fc" id="L16">        this.repository = repository;</span>
+<span class="fc" id="L17">    }</span>
+
+    // Cache-aside pattern: checks Redis first, then falls back to MySQL.
+    @Cacheable(value = &quot;products&quot;, key = &quot;#id&quot;)
+    public Product getProduct(Long id) {
+<span class="fc" id="L22">        return repository.findById(id).orElse(null);</span>
+    }
+
+    @Cacheable(value = &quot;products&quot;, key = &quot;'all'&quot;)
+    public List&lt;Product&gt; getAllProducts() {
+<span class="fc" id="L27">        return repository.findAll();</span>
+    }
+
+    // Keeps the cache honest by removing stale data on update.
+    @CacheEvict(value = &quot;products&quot;, allEntries = true)
+    public Product saveProduct(Product product) {
+<span class="fc" id="L33">        return repository.save(product);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

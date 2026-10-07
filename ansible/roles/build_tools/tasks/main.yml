@@ -1,0 +1,39 @@
+---
+- name: Ensure Docker is running
+  systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Install Maven
+  yum:
+    name: maven
+    state: present
+
+- name: Create build-tools directory
+  file:
+    path: /opt/capstone
+    state: directory
+    mode: '0755'
+
+- name: Copy Maven + Trivy docker-compose file to the host
+  copy:
+    src: ../../../../docker-toolchain/docker-compose-build-tools.yml
+    dest: /opt/capstone/docker-compose-build-tools.yml
+    mode: '0644'
+
+- name: Start Maven and Trivy Docker services
+  community.docker.docker_compose_v2:
+    project_src: /opt/capstone
+    files:
+      - docker-compose-build-tools.yml
+    state: present
+
+- name: Open Maven and Trivy ports when firewalld is present
+  shell: |
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      firewall-cmd --permanent --add-port=18080/tcp >/dev/null 2>&1 || true
+      firewall-cmd --permanent --add-port=18081/tcp >/dev/null 2>&1 || true
+      firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+  changed_when: false

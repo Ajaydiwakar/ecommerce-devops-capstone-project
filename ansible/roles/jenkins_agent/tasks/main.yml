@@ -1,0 +1,32 @@
+---
+- name: Install Java 17 and SSH tooling
+  yum:
+    name:
+      - java-17-amazon-corretto-devel
+      - openssh-server
+      - git
+      - curl
+      - wget
+    state: present
+
+- name: Create Jenkins user if missing
+  user:
+    name: jenkins
+    shell: /bin/bash
+    create_home: true
+    groups: wheel
+    append: true
+
+- name: Ensure sshd is enabled and running
+  systemd:
+    name: sshd
+    enabled: true
+    state: started
+
+- name: Allow SSH access when firewalld is present
+  shell: |
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      firewall-cmd --permanent --add-port=22/tcp >/dev/null 2>&1 || true
+      firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+  changed_when: false

@@ -1,0 +1,29 @@
+ecommerce-capstone
+├── pom.xml
+├── Dockerfile
+├── Jenkinsfile
+├── ansible
+│   ├── inventory.ini
+│   └── deploy.yml
+└── src
+    ├── main
+    │   ├── resources
+    │   │   └── application.yml
+    │   └── java
+    │       └── com
+    │           └── ecommerce
+    │               ├── EcommerceApplication.java
+    │               ├── controller
+    │               │   └── ProductController.java
+    │               ├── service
+    │               │   ├── ProductService.java
+    │               │   └── S3Service.java
+    │               └── model
+    │                   └── Product.java
+    └── test
+        └── java
+            └── com
+                └── ecommerce
+                    ├── service
+                    │   └── ProductServiceTest.java   <-- ADD THIS (Unit Test)
+                    └── EcommerceApplicationTests.java    <-- ADD THIS (Context Test)

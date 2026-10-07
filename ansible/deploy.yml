@@ -1,0 +1,43 @@
+- name: Rolling Deployment to App Servers
+  hosts: app_servers
+  serial: 1 # Rolling deploy: one server at a time for zero downtime
+  become: yes
+  vars:
+    ecr_registry: "426163621897.dkr.ecr.us-east-1.amazonaws.com"
+    image_name: "ecommerce"
+    
+  tasks:
+    - name: Ensure Docker is installed
+      yum:
+        name: docker
+        state: present
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Log in to ECR (Uses IAM Instance Profile)
+      shell: |
+        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin {{ ecr_registry }}
+
+    - name: Pull image myapp:{{ build_number }}
+      command: docker pull {{ ecr_registry }}/{{ image_name }}:{{ build_number }}
+
+    - name: Stop old container
+      command: docker stop ecommerce
+      ignore_errors: yes
+
+    - name: Remove old container
+      command: docker rm ecommerce
+      ignore_errors: yes
+
+    - name: Run new container
+      command: >
+        docker run -d --restart always --name ecommerce -p 8080:8080
+        -e DB_HOST={{ lookup('env', 'DB_HOST') }}
+        -e REDIS_HOST={{ lookup('env', 'REDIS_HOST') }}
+        -e S3_BUCKET={{ lookup('env', 'S3_BUCKET') }}
+        -e AWS_REGION=us-east-1
+        {{ ecr_registry }}/{{ image_name }}:{{ build_number }}

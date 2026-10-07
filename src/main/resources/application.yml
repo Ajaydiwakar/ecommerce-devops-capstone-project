@@ -1,0 +1,23 @@
+spring:
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:ecommerce}
+    username: ${DB_USERNAME:admin}
+    password: ${DB_PASSWORD:password}
+  jpa:
+    hibernate:
+      ddl-auto: update
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}  # The Elasticache endpoint
+      port: ${REDIS_PORT:6379}
+  cache:
+    type: redis
+    redis:
+      cache-null-values: false
+
+cache:
+  type: redis                      # Use Redis as the cache backend
+
+aws:
+  s3:
+    bucket: ${S3_BUCKET:ecommerce-product-images-426163621897}
