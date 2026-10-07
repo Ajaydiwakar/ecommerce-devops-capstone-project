@@ -82,6 +82,58 @@ get_subnet_id() {
   echo "$subnet_id"
 }
 
+ensure_public_subnet_layout() {
+  local vpc_id="${1:-$(get_vpc_id)}"
+  local igw_id
+  local public_rt_id
+
+  igw_id="$(aws ec2 describe-internet-gateways --region "$AWS_REGION" --filters "Name=attachment.vpc-id,Values=${vpc_id}" --query 'InternetGateways[0].InternetGatewayId' --output text 2>/dev/null || true)"
+
+  if [ -z "$igw_id" ] || [ "$igw_id" = "None" ]; then
+    igw_id="$(aws ec2 create-internet-gateway --region "$AWS_REGION" --query 'InternetGateway.InternetGatewayId' --output text)"
+    aws ec2 attach-internet-gateway --region "$AWS_REGION" --vpc-id "$vpc_id" --internet-gateway-id "$igw_id" >/dev/null
+  fi
+
+  public_rt_id="$(aws ec2 describe-route-tables --region "$AWS_REGION" --filters "Name=vpc-id,Values=${vpc_id}" --query 'RouteTables[?length(Routes[?GatewayId!=`local` && starts_with(GatewayId, `igw-`)]) > `0`].RouteTableId | [0]' --output text 2>/dev/null || true)"
+
+  if [ -z "$public_rt_id" ] || [ "$public_rt_id" = "None" ]; then
+    public_rt_id="$(aws ec2 create-route-table --region "$AWS_REGION" --vpc-id "$vpc_id" --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=${vpc_id}-public-route-table},{Key=${COMMON_TAG_KEY},Value=${COMMON_TAG_VALUE}}]" --query 'RouteTable.RouteTableId' --output text)"
+    aws ec2 create-route --region "$AWS_REGION" --route-table-id "$public_rt_id" --destination-cidr-block 0.0.0.0/0 --gateway-id "$igw_id" >/dev/null
+  fi
+
+  for subnet_id in $(aws ec2 describe-subnets --region "$AWS_REGION" --filters "Name=vpc-id,Values=${vpc_id}" "Name=tag:Name,Values=*public*" --query 'Subnets[].SubnetId' --output text 2>/dev/null); do
+    aws ec2 modify-subnet-attribute --region "$AWS_REGION" --subnet-id "$subnet_id" --map-public-ip-on-launch >/dev/null 2>&1 || true
+    aws ec2 associate-route-table --region "$AWS_REGION" --subnet-id "$subnet_id" --route-table-id "$public_rt_id" >/dev/null 2>&1 || true
+  done
+
+  echo "$public_rt_id"
+}
+
+get_public_subnet_id() {
+  local subnet_name="${1:-${PUBLIC_SUBNET_NAME:-public-subnet-1}}"
+  local vpc_id="${2:-$(get_vpc_id)}"
+  local subnet_id
+
+  ensure_public_subnet_layout "$vpc_id" >/dev/null
+
+  subnet_id="$(aws ec2 describe-subnets --region "$AWS_REGION" --filters "Name=vpc-id,Values=${vpc_id}" "Name=tag:Name,Values=${subnet_name}" "Name=map-public-ip-on-launch,Values=true" --query 'Subnets[0].SubnetId' --output text 2>/dev/null || true)"
+
+  if [ -z "$subnet_id" ] || [ "$subnet_id" = "None" ]; then
+    subnet_id="$(aws ec2 describe-subnets --region "$AWS_REGION" --filters "Name=vpc-id,Values=${vpc_id}" "Name=tag:Name,Values=*${subnet_name}*" "Name=map-public-ip-on-launch,Values=true" --query 'Subnets[0].SubnetId' --output text 2>/dev/null || true)"
+  fi
+
+  if [ -z "$subnet_id" ] || [ "$subnet_id" = "None" ]; then
+    subnet_id="$(aws ec2 describe-subnets --region "$AWS_REGION" --filters "Name=vpc-id,Values=${vpc_id}" "Name=map-public-ip-on-launch,Values=true" --query 'Subnets[0].SubnetId' --output text 2>/dev/null || true)"
+  fi
+
+  if [ -z "$subnet_id" ] || [ "$subnet_id" = "None" ]; then
+    echo "ERROR: No public subnet found in VPC ${vpc_id}. The bastion must run in a public subnet with internet access." >&2
+    exit 1
+  fi
+
+  echo "$subnet_id"
+}
+
 get_security_group_id() {
   local sg_name="${1:-${SECURITY_GROUP_NAME:-default}}"
   local vpc_id="${2:-$(get_vpc_id)}"
@@ -148,6 +200,7 @@ create_instance() {
     --key-name "$key_name"
     --subnet-id "$subnet_id"
     --security-group-ids "$sg_id"
+    --associate-public-ip-address
   )
 
   if [ -n "$instance_profile" ]; then
@@ -169,6 +222,38 @@ create_instance() {
 wait_for_instance_running() {
   local instance_id="${1}"
   aws ec2 wait instance-running --region "$AWS_REGION" --instance-ids "$instance_id"
+}
+
+ensure_instance_has_public_ip() {
+  local instance_id="${1}"
+  local instance_name="${2:-${instance_id}}"
+  local public_ip
+
+  public_ip="$(aws ec2 describe-instances \
+    --region "$AWS_REGION" \
+    --instance-ids "$instance_id" \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' \
+    --output text 2>/dev/null || true)"
+
+  if [ -n "$public_ip" ] && [ "$public_ip" != "None" ] && [ "$public_ip" != "null" ]; then
+    echo "Instance '${instance_name}' already has a public IP: ${public_ip}"
+    return 0
+  fi
+
+  local allocation_id
+  allocation_id="$(aws ec2 allocate-address --region "$AWS_REGION" --domain vpc --query 'AllocationId' --output text)"
+  aws ec2 associate-address \
+    --region "$AWS_REGION" \
+    --instance-id "$instance_id" \
+    --allocation-id "$allocation_id" >/dev/null
+
+  public_ip="$(aws ec2 describe-instances \
+    --region "$AWS_REGION" \
+    --instance-ids "$instance_id" \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' \
+    --output text)"
+
+  echo "Associated public IP ${public_ip} with instance '${instance_name}' (${instance_id})"
 }
 
 print_instance_summary() {

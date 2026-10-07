@@ -1,0 +1,3 @@
+ansible/capstone-key.pem
+.ssh/
+*.pem
