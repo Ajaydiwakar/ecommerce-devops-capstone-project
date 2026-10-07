@@ -5,12 +5,20 @@
   vars:
     ecr_registry: "426163621897.dkr.ecr.us-east-1.amazonaws.com"
     image_name: "ecommerce"
-    
+
   tasks:
-    - name: Ensure Docker is installed
+    - name: Ensure Docker is installed on Debian-based hosts
+      apt:
+        name: docker.io
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure Docker is installed on RedHat-based hosts
       yum:
         name: docker
         state: present
+      when: ansible_os_family == "RedHat"
 
     - name: Start and enable Docker service
       systemd:

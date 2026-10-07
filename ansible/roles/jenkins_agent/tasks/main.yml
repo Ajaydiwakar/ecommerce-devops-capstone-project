@@ -1,5 +1,17 @@
 ---
-- name: Install Java 17 and SSH tooling
+- name: Install Java 17 and SSH tooling on Debian-based hosts
+  apt:
+    name:
+      - openjdk-17-jdk
+      - openssh-server
+      - git
+      - curl
+      - wget
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Install Java 17 and SSH tooling on RedHat-based hosts
   yum:
     name:
       - java-17-amazon-corretto-devel
@@ -8,6 +20,7 @@
       - curl
       - wget
     state: present
+  when: ansible_os_family == "RedHat"
 
 - name: Create Jenkins user if missing
   user:

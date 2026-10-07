@@ -1,5 +1,18 @@
 ---
-- name: Add Jenkins repository
+- name: Add Jenkins repository on Debian-based hosts
+  apt_key:
+    url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Add Jenkins repository on Debian-based hosts
+  apt_repository:
+    repo: 'deb https://pkg.jenkins.io/debian-stable binary/'
+    state: present
+    filename: jenkins
+  when: ansible_os_family == "Debian"
+
+- name: Add Jenkins repository on RedHat-based hosts
   yum_repository:
     name: jenkins
     description: Jenkins stable repo
@@ -7,11 +20,20 @@
     gpgcheck: true
     gpgkey: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
     enabled: true
+  when: ansible_os_family == "RedHat"
 
-- name: Install Jenkins
+- name: Install Jenkins on Debian-based hosts
+  apt:
+    name: jenkins
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Install Jenkins on RedHat-based hosts
   yum:
     name: jenkins
     state: present
+  when: ansible_os_family == "RedHat"
 
 - name: Ensure Jenkins service is enabled and started
   systemd:

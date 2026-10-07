@@ -5,10 +5,18 @@
     enabled: true
     state: started
 
-- name: Install Maven
+- name: Install Maven on Debian-based hosts
+  apt:
+    name: maven
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Install Maven on RedHat-based hosts
   yum:
     name: maven
     state: present
+  when: ansible_os_family == "RedHat"
 
 - name: Create build-tools directory
   file:
