@@ -1,47 +1,39 @@
 ---
-- name: Add Jenkins repository on Debian-based hosts
-  apt_key:
-    url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-    state: present
-  when: ansible_os_family == "Debian"
-
-- name: Add Jenkins repository on Debian-based hosts
-  apt_repository:
-    repo: 'deb https://pkg.jenkins.io/debian-stable binary/'
-    state: present
-    filename: jenkins
-  when: ansible_os_family == "Debian"
-
-- name: Add Jenkins repository on RedHat-based hosts
-  yum_repository:
-    name: jenkins
-    description: Jenkins stable repo
-    baseurl: https://pkg.jenkins.io/redhat-stable
-    gpgcheck: true
-    gpgkey: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
-    enabled: true
-  when: ansible_os_family == "RedHat"
-
-- name: Install Jenkins on Debian-based hosts
-  apt:
-    name: jenkins
-    state: present
-    update_cache: true
-  when: ansible_os_family == "Debian"
-
-- name: Install Jenkins on RedHat-based hosts
-  yum:
-    name: jenkins
-    state: present
-  when: ansible_os_family == "RedHat"
-
-- name: Ensure Jenkins service is enabled and started
+- name: Ensure Docker is available
   systemd:
-    name: jenkins
+    name: docker
     enabled: true
     state: started
 
-- name: Open Jenkins UI port 8080 when firewalld is present
+- name: Create Jenkins home directory
+  file:
+    path: /opt/jenkins_home
+    state: directory
+    owner: 1000
+    group: 1000
+    mode: '0755'
+
+- name: Remove existing Jenkins container if present
+  community.docker.docker_container:
+    name: jenkins
+    state: absent
+
+- name: Run Jenkins container
+  community.docker.docker_container:
+    name: jenkins
+    image: jenkins/jenkins:lts
+    state: started
+    restart_policy: unless-stopped
+    published_ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - /opt/jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    env:
+      JAVA_OPTS: "-Djenkins.install.runSetupWizard=false"
+
+- name: Open Jenkins UI and agent ports when firewalld is present
   shell: |
     if command -v firewall-cmd >/dev/null 2>&1; then
       firewall-cmd --permanent --add-port=8080/tcp >/dev/null 2>&1 || true
