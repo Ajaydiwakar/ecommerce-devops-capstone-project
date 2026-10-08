@@ -1,4 +1,13 @@
 ---
+- name: Repair apt state before upgrading on Debian-based hosts
+  shell: |
+    dpkg --configure -a || true
+    apt-get -f install -y || true
+  args:
+    executable: /bin/bash
+  when: ansible_os_family == "Debian"
+  changed_when: false
+
 - name: Upgrade existing packages on Debian-based hosts
   apt:
     upgrade: safe
