@@ -1,8 +1,21 @@
 ---
 - name: Repair apt state before upgrading on Debian-based hosts
   shell: |
+    set -e
     dpkg --configure -a || true
     apt-get -f install -y || true
+    apt-get update -qq || true
+  args:
+    executable: /bin/bash
+  when: ansible_os_family == "Debian"
+  changed_when: false
+
+- name: Remove conflicting Docker/containerd packages before install on Debian-based hosts
+  shell: |
+    set -e
+    apt-get remove -y containerd containerd.io docker docker-engine docker.io docker-ce docker-ce-cli || true
+    apt-get purge -y containerd containerd.io docker docker-engine docker.io docker-ce docker-ce-cli || true
+    apt-get autoremove -y || true
   args:
     executable: /bin/bash
   when: ansible_os_family == "Debian"
