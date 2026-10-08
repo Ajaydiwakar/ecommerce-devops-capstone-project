@@ -17,6 +17,15 @@
     dest: /opt/capstone/docker-compose-build-tools.yml
     mode: '0644'
 
+- name: Remove stale Maven and Trivy containers before starting Compose
+  shell: |
+    set -e
+    docker rm -f maven-builder trivy-scanner >/dev/null 2>&1 || true
+    docker compose --project-directory /opt/capstone --file docker-compose-build-tools.yml down --remove-orphans >/dev/null 2>&1 || true
+  args:
+    executable: /bin/bash
+  changed_when: false
+
 - name: Start Maven and Trivy Docker services
   community.docker.docker_compose_v2:
     project_src: /opt/capstone

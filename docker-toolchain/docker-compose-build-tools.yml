@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Single EC2 build host that runs both Maven and Trivy as separate containers.
 # Jenkins master / agents and SonarQube can reach these services over the host IP
 # using the published ports below, instead of creating two separate EC2 instances.
